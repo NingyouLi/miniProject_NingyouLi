@@ -1,41 +1,96 @@
+# https://github.com/NingyouLi/miniProject_NingyouLi.git2
 # import packages
 import numpy as np
 import matplotlib.pyplot as plt
 import SimpleITK as sitk
 
 
-def prostate_segmenter(image, glambda=0.2, seed_pts=[(256, 252, 22)], Multiplier=1.31):
-    slice_no = round(image.GetSize()[2] / 2)
+def prostate_segmenter(image, glambda=0.2, seed_pts=(259,253,22), TimeStep=0.125, conductance=0.3, sigma=0.1, \
+                       alpha=-0.3, beta=2.0, stoppingValue=480, upperThreshold=800, lowerThreshold=0):
+    """
+    :param image: image object, input image
+    :param glambda: lambda, parameter for gamma filtering
+    :param seed_pts: a point inside the object you wish to segmented
+    :param TimeStep: parameter of CurvatureAnisotropicDiffusionImageFilter
+    :param conductance: parameter of CurvatureAnisotropicDiffusionImageFilter
+    :param sigma: parameter of gradient filter, representing the size of the mask
+    :param alpha: parameter of sigmoid filter
+    :param beta: parameter of sigmoid filter
+    :param stoppingValue: parameter of Fast Marching filter
+    :param upperThreshold: set the upper threshold for thresholding
+    :param lowerThreshold: set the lower threshold for thresholding
+    :return: the segmented image
+    """
+    slice_no = round(image.GetSize()[2]/2)
     img = sitk.Cast(image, sitk.sitkFloat32)
     # brighten the image using gamma filter to show more details in dark
-    filtered_img = ((image / 255) ** glambda)  # lambda<0
-    gamma_img = sitk.RescaleIntensity(filtered_img, 0, 255)
+    filtered_img = ((image/255)**glambda) # lambda<0
+    gamma_img = sitk.RescaleIntensity(filtered_img,0,255)
+    # smoothing filter
+    smoothing = sitk.CurvatureAnisotropicDiffusionImageFilter()
+    smoothing.SetTimeStep(TimeStep)
+    smoothing.SetConductanceParameter(conductance)
+    smoothingOutput = smoothing.Execute(gamma_img)
+    # gradient filter
+    gradientMagnitude = sitk.GradientMagnitudeRecursiveGaussianImageFilter()
+    gradientMagnitude.SetSigma(sigma)
+    gradientMagnitudeOutput = gradientMagnitude.Execute(smoothingOutput)
+    # sigmoid curve filter
+    sigmoid = sitk.SigmoidImageFilter()
+    sigmoid.SetOutputMinimum(0.0)
+    sigmoid.SetOutputMaximum(1.0)
+    sigmoid.SetAlpha(alpha)
+    sigmoid.SetBeta(beta)
+    sigmoid.DebugOn()
+    sigmoidOutput = sigmoid.Execute(gradientMagnitudeOutput)
+    # fast marching
+    fastMarching = sitk.FastMarchingImageFilter()
+    #trialPoint = (259,253,22)
+    fastMarching.AddTrialPoint(seed_pts)
+    fastMarching.SetStoppingValue(stoppingValue)
+    fastMarchingOutput = fastMarching.Execute(sigmoidOutput)
+    # thresholding
+    thresholder = sitk.BinaryThresholdImageFilter()
+    thresholder.SetLowerThreshold(lowerThreshold)
+    thresholder.SetUpperThreshold(upperThreshold)
+    thresholder.SetOutsideValue(0)
+    thresholder.SetInsideValue(255)
+    result_img = thresholder.Execute(fastMarchingOutput)
 
-    # Use region growing to segment the prostate
-    growing_filter = sitk.ConfidenceConnectedImageFilter()
-    growing_filter.SetSeedList(seed_pts)
-    # set range of pixel intensity
-    growing_filter.SetMultiplier(Multiplier)
-    growed_img = growing_filter.Execute(gamma_img)
-    plt.figure(figsize=(10, 5))
-    plt.imshow(sitk.GetArrayFromImage(growed_img[:, :, slice_no]))
-    return growed_img
+    plt.figure(figsize=(10,5))
+    plt.imshow(sitk.GetArrayFromImage(result_img[:,:,slice_no]))
+    return result_img
 
-def saveSegmentation(growed_image):
+def saveImage(image, fileName='my_segmentation.nrrd'):
+    """
+    :param image: input image
+    :param fileName: the filename for the output .nrrd file
+    :return: None
+    """
     writer = sitk.ImageFileWriter()
-    writer.SetFileName('my_segmentation.nrrd')
-    writer.Execute(growed_image)
+    writer.SetFileName(fileName)
+    writer.Execute(image)
     return None
 
 def overlay_visulize(image, mask_img):
+    """
+    :param image: input image
+    :param mask_img: segmented image
+    :return: the overlay image
+    """
     slice_no = round(image.GetSize()[2]/2)
     overlay_image = sitk.LabelOverlay(image[:,:,slice_no], mask_img[:,:,slice_no])
     plt.figure(figsize=(10,5))
     plt.imshow(sitk.GetArrayFromImage(overlay_image).astype(np.uint8))
     plt.show()
-    return None
+    return overlay_image
 
 def seg_eval_dice(filtered_img, img):
+    """
+    :param filtered_img: segmented image
+    :param img: image object
+    :return: DSC of the filtered image and the original image
+    """
     dice_dist = sitk.LabelOverlapMeasuresImageFilter()
     dice_dist.Execute(img>0.5, filtered_img>0.5)
     dice = dice_dist.GetDiceCoefficient()
@@ -44,6 +99,11 @@ def seg_eval_dice(filtered_img, img):
 
 
 def seg_eval_hausdorff(filtered_img, img):
+    """
+    :param filtered_img: filtered image object
+    :param img: image object
+    :return: the HD of the filtered image and the original image object
+    """
     hausdorffcomputer = sitk.HausdorffDistanceImageFilter()
     hausdorffcomputer.Execute(img>0.5, filtered_img>0.5)
     #AverageHD = hausdorffcomputer.GetAverageHausdorffDistance()
@@ -52,6 +112,10 @@ def seg_eval_hausdorff(filtered_img, img):
     return HD
 
 def findMaxArea(seg_img):
+    """
+    :param seg_img: segmented image object (golden standard image in this case)
+    :return: the slice with maximum segmented area
+    """
     area_lst = []
     for slice_no in range(seg_img.GetSize()[2]):
         img_array = sitk.GetArrayFromImage(seg_img[:,:,slice_no])
@@ -64,6 +128,10 @@ def findMaxArea(seg_img):
     return slices
 
 def get_target_loc(seg_img):
+    """
+    :param seg_img: the segmented image object
+    :return: the physical coordinate of the biopsy target
+    """
     slide_no = findMaxArea(seg_img)
     segImage_array = sitk.GetArrayFromImage(seg_img[:,:,slide_no])
     x = np.mean(np.column_stack(np.where(segImage_array > 0)[1]))
@@ -74,6 +142,11 @@ def get_target_loc(seg_img):
     return physical
 
 def overlay_target(coordinate, image):
+    """
+    :param coordinate: the physical coordinate of the red X
+    :param image: the input image object
+    :return:None
+    """
     slide_no = findMaxArea(image)
     image_array = sitk.GetArrayFromImage(image[:,:,slide_no])
     pixel_coor = image.TransformPhysicalPointToIndex(coordinate)
@@ -84,6 +157,12 @@ def overlay_target(coordinate, image):
 
 
 def pixel_extract(image, point, width):
+    """
+    :param image: image object
+    :param point: physical coordinate of the centre of the cube
+    :param width: The width of the cube
+    :return: a list of pixel intensities
+    """
     sub = (image.TransformPhysicalPointToIndex((point[0]-width/2, point[1]-width/2, point[2]-width/2)))
     add = (image.TransformPhysicalPointToIndex((point[0]+width/2, point[1]+width/2, point[2]+width/2)))
     slide_lst = list(range(sub[2], (add[2])+1))
@@ -97,6 +176,11 @@ def pixel_extract(image, point, width):
 
 
 def plotBoxplot(data, point):
+    """
+    :param data: list, a list of pixel intensities
+    :param point: the physical coordinate of the centre of the cube
+    :return: None
+    """
     plt.boxplot(data)
     plt.xlabel(str(point))
     plt.ylabel('Pixel Intensity')

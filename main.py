@@ -1,3 +1,4 @@
+# https://github.com/NingyouLi/miniProject_NingyouLi.git
 import utils
 
 def main():
@@ -7,7 +8,7 @@ def main():
     # segmentation
     filtered_img = prostate_segmenter(img)
     # save segmentation
-    saveSegmentation(filtered_img)
+    saveImage(filtered_img, fileName='my_segmentation.nrrd')
     # visulize overlay images
     print('my segmentation:')
     overlay_visulize(img, filtered_img)
